@@ -47,8 +47,9 @@ See `requirements.txt`
 - Deploy via SIEM system or Azure Functions  
 
 ## 👨‍💻 Authors
-Team of 3 Data Science Students  
-(Insert your names & roles here)
+Nakshatra R
+Anumitha Rajesh
+Ashwitha M
 
 ---
 
