@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Insider Threat Dashboard (Standalone)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <!-- Plotly -->
+  <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+  <!-- PapaParse for CSV parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <!-- Simple styling -->
+  <style>
+    body { font-family: Arial, sans-serif; margin: 18px; background: #f7f9fc; color:#111; }
+    h1 { margin-bottom: 6px; }
+    .controls { margin: 12px 0 18px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .card { background:white; padding:12px; border-radius:8px; box-shadow:0 1px 6px rgba(20,30,40,0.06); }
+    #charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top:12px; }
+    #heatmap { grid-column: 1 / -1; height:420px; }
+    .btn { padding:8px 12px; border-radius:6px; border:none; cursor:pointer; font-weight:600; }
+    .btn-primary { background:#0b69ff; color:white; }
+    .btn-ghost { background:transparent; border:1px solid #ddd; color:#333; }
+    .small { font-size:13px; color:#444; }
+    select, input[type=file] { padding:8px; border-radius:6px; border:1px solid #ccc; }
+    #status { margin-left:8px; font-size:13px; color:#666; }
+    @media (max-width:900px){ #charts{ grid-template-columns: 1fr; } #heatmap{ height:360px; } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🛡️ Insider Threat Dashboard — Standalone</h1>
+    <div class="small">Runs entirely in your browser. Upload the CSV from the Colab notebook (anomaly_results_v5.csv) or use sample data.</div>
+  </div>
+
+  <div class="controls">
+    <label class="card">
+      <input type="file" id="csvFile" accept=".csv">
+      <span class="small"> Upload anomaly_results_v5.csv</span>
+    </label>
+
+    <button class="btn btn-ghost card" id="sampleBtn">Use sample data (demo)</button>
+
+    <div class="card">
+      <label class="small">Anomaly type</label><br>
+      <select id="anomalyType">
+        <option value="All">All Anomalies</option>
+        <option value="HighFileAccess">High File Access</option>
+        <option value="PrivilegeEscalation">Privilege Escalation</option>
+        <option value="LateNight">Late-Night Activity</option>
+        <option value="EmailExfiltration">Email Exfiltration</option>
+      </select>
+    </div>
+
+    <div class="card">
+      <label class="small">Top N users for bar chart</label><br>
+      <input type="number" id="topN" value="10" min="3" max="50" style="width:80px;">
+    </div>
+
+    <div class="card">
+      <button class="btn btn-primary" id="downloadBtn">Download filtered CSV</button>
+      <span id="status"></span>
+    </div>
+  </div>
+
+  <div id="charts">
+    <div id="bar" class="card" style="padding:6px; height:380px;"></div>
+    <div id="scatter" class="card" style="padding:6px; height:380px;"></div>
+    <div id="heatmap" class="card"></div>
+  </div>
+
+<script>
+// ---------- Utilities ----------
+let rawData = null; // array of objects
+let parsedDF = null;
+
+function parseCSVFile(file) {
+  document.getElementById('status').textContent = 'Parsing CSV...';
+  Papa.parse(file, {
+    header: true,
+    dynamicTyping: true,
+    skipEmptyLines: true,
+    complete: function(results) {
+      rawData = results.data;
+      // normalize column names (trim)
+      rawData = rawData.map(r => {
+        const out = {};
+        for (let k in r) out[k.trim()] = r[k];
+        return out;
+      });
+      postProcessData();
+      document.getElementById('status').textContent = 'CSV loaded: ' + rawData.length + ' rows';
+      renderAll();
+    },
+    error: function(err){ alert('CSV parse error: ' + err.message); document.getElementById('status').textContent = 'Parse error'; }
+  });
+}
+
+function downloadCSV(dataArray, filename='filtered_anomalies.csv') {
+  const csv = Papa.unparse(dataArray);
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  link.setAttribute("href", url);
+  link.setAttribute("download", filename);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+// Convert date strings to Date object & ensure numeric columns exist
+function postProcessData(){
+  parsedDF = rawData.map(r => {
+    const obj = Object.assign({}, r);
+    // safe conversions
+    obj.files_accessed = Number(obj.total_file_accesses ?? obj.files_accessed ?? 0) || 0;
+    obj.emails_sent = Number(obj.emails_sent ?? 0) || 0;
+    obj.privileged_commands = Number(obj.privileged_commands ?? obj.privileged_actions ?? 0) || 0;
+    obj.off_hours_activity = Number(obj.off_hours_activity ?? obj.late_night ?? 0) || 0;
+    obj.logins = Number(obj.logins ?? 0) || 0;
+    obj.failed_logins = Number(obj.failed_logins ?? 0) || 0;
+    obj.user = String(obj.user ?? obj.User ?? obj.username ?? 'unknown');
+    // date parsing fallback
+    obj.date = obj.date ? new Date(obj.date) : null;
+    obj.weekday = obj.date ? ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][obj.date.getDay()] : null;
+    // compute activity_score if missing
+    obj.activity_score = Number(obj.activity_score ?? (obj.files_accessed + obj.emails_sent*2 + (obj.websites_visited||0)*0.5 + obj.logins*1.5 + obj.failed_logins*2)) || 0;
+    return obj;
+  });
+}
+
+// ---------- Filtering logic ----------
+function filterByAnomaly(type){
+  if (!parsedDF) return [];
+  const arr = parsedDF.slice();
+  if (type === 'All') return arr;
+  if (type === 'HighFileAccess'){
+    // top 5% by files_accessed
+    const cut = quantile(arr.map(d=>d.files_accessed).filter(v => v!=null), 0.95);
+    return arr.filter(d => d.files_accessed >= cut);
+  }
+  if (type === 'PrivilegeEscalation'){
+    return arr.filter(d => d.privileged_commands > 0);
+  }
+  if (type === 'LateNight'){
+    return arr.filter(d => d.off_hours_activity === 1);
+  }
+  if (type === 'EmailExfiltration'){
+    const cut = quantile(arr.map(d=>d.emails_sent).filter(v=>v!=null), 0.95);
+    return arr.filter(d => d.emails_sent >= cut);
+  }
+  return arr;
+}
+
+function quantile(values, q){
+  if (!values || values.length===0) return 0;
+  const vs = values.slice().sort((a,b)=>a-b);
+  const pos = (vs.length-1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  if ((vs[base+1] !== undefined)) return vs[base] + rest * (vs[base+1]-vs[base]);
+  return vs[base];
+}
+
+// ---------- Charts ----------
+function renderBar(data){
+  const topN = Number(document.getElementById('topN').value) || 10;
+  // count per user
+  const counts = {};
+  data.forEach(d => counts[d.user] = (counts[d.user]||0)+1);
+  const items = Object.keys(counts).map(k => ({user:k, count:counts[k]})).sort((a,b)=>b.count-a.count).slice(0, topN).reverse();
+  const x = items.map(d=>d.count), y = items.map(d=>d.user);
+  const trace = { x:x, y:y, type:'bar', orientation:'h', marker:{color:'#ff7f0e'} };
+  const layout = { title:`Top ${topN} users with anomalies`, margin:{l:120} };
+  Plotly.newPlot('bar', [trace], layout, {responsive:true});
+}
+
+function renderScatter(data){
+  const x = data.map(d=>d.files_accessed), y = data.map(d=>d.emails_sent);
+  const text = data.map(d => `${d.user}<br>${d.date?d.date.toISOString().slice(0,10):''}`);
+  const color = data.map(d => d.privileged_commands || 0);
+  const trace = { x:x, y:y, text:text, mode:'markers', marker:{size:10, color:color, colorscale:'Viridis', colorbar:{title:'privileged'}} };
+  const layout = { title:'Files Accessed vs Emails Sent', xaxis:{title:'Files Accessed'}, yaxis:{title:'Emails Sent'}, margin:{t:40} };
+  Plotly.newPlot('scatter', [trace], layout, {responsive:true});
+}
+
+function renderHeatmap(data){
+  if (!data || data.length===0){ document.getElementById('heatmap').innerHTML = '<div class="small">No data for heatmap</div>'; return; }
+  // pivot table: rows=user, cols=weekday sum(files_accessed)
+  const grouped = {};
+  data.forEach(d => {
+    const u = d.user, w = d.weekday || 'Unknown';
+    if (!grouped[u]) grouped[u] = {};
+    grouped[u][w] = (grouped[u][w]||0) + (Number(d.files_accessed)||0);
+  });
+  // compute top users by total files
+  const totals = Object.keys(grouped).map(u => ({user:u, total:Object.values(grouped[u]).reduce((a,b)=>a+b,0)}));
+  totals.sort((a,b)=>b.total-a.total);
+  const topUsers = totals.slice(0,10).map(t=>t.user);
+  // weekdays order
+  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const z = topUsers.map(u => days.map(day => grouped[u][day]||0));
+  const trace = { z:z, x:days, y:topUsers, type:'heatmap', colorscale:'YlOrRd' };
+  const layout = { title:'Weekly File Access Heatmap (Top 10 users)', height:420, margin:{l:120} };
+  Plotly.newPlot('heatmap', [trace], layout, {responsive:true});
+}
+
+// ---------- UI wiring ----------
+document.getElementById('csvFile').addEventListener('change', function(evt){
+  const f = evt.target.files[0];
+  if (!f) return;
+  parseCSVFile(f);
+});
+
+document.getElementById('sampleBtn').addEventListener('click', function(){
+  // generate small sample data for demo
+  const users = Array.from({length:50}, (_,i)=>'user'+String(i+1).padStart(3,'0'));
+  const rows = [];
+  const start = new Date('2025-08-01');
+  for (let i=0;i<500;i++){
+    const user = users[Math.floor(Math.random()*users.length)];
+    const date = new Date(start.getTime() + Math.floor(Math.random()*90)*24*3600*1000);
+    const files = Math.max(0, Math.round(Math.random()*8 + (Math.random()<0.05?200*Math.random()+50:0)));
+    const emails = Math.max(0, Math.round(Math.random()*3 + (Math.random()<0.03?30*Math.random()+10:0)));
+    const priv = Math.random()<0.03?1:0;
+    const off = Math.random()<0.05?1:0;
+    rows.push({
+      user: user, date: date.toISOString().slice(0,10), files_accessed: files,
+      emails_sent: emails, privileged_commands: priv, off_hours_activity: off,
+      logins: Math.max(1, Math.round(Math.random()*3)), failed_logins: Math.random()<0.05?Math.round(Math.random()*5):0
+    });
+  }
+  rawData = rows.map(r => Object.assign({}, r));
+  postProcessData();
+  document.getElementById('status').textContent = 'Sample data loaded ('+rawData.length+' rows)';
+  renderAll();
+});
+
+document.getElementById('anomalyType').addEventListener('change', renderAll);
+document.getElementById('topN').addEventListener('input', renderAll);
+document.getElementById('downloadBtn').addEventListener('click', function(){
+  const type = document.getElementById('anomalyType').value;
+  const filtered = filterByAnomaly(type);
+  if (!filtered || filtered.length===0){ alert('No rows to download'); return; }
+  downloadCSV(filtered, 'filtered_anomalies.csv');
+});
+
+function renderAll(){
+  const type = document.getElementById('anomalyType').value;
+  const filtered = filterByAnomaly(type);
+  renderBar(filtered);
+  renderScatter(filtered);
+  renderHeatmap(filtered);
+}
+
+// initialize empty placeholders
+Plotly.newPlot('bar', [{x:[0], y:['no data'], type:'bar'}], {margin:{l:120}});
+Plotly.newPlot('scatter', [], {title:'Files vs Emails'});
+document.getElementById('heatmap').innerHTML = '<div class="small">Upload CSV or use sample data to see heatmap</div>';
+</script>
+</body>
+</html>
