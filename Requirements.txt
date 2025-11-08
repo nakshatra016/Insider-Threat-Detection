@@ -1,0 +1,10 @@
+Libraries :
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+plotly
+dash
+nbformat
+shap
